@@ -5,10 +5,9 @@
 ._*
 .Spotlight-V100
 .Trashes
+.env 
 
 # VSCode
 .vscode/
 *.code-workspace
 
-# MZinga local clone
-mzinga/

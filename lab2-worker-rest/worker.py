@@ -19,10 +19,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("lab2-worker")
 
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:3000")
+API_BASE_URL = os.getenv("MZINGA_URL") or os.getenv("API_BASE_URL", "http://localhost:3000")
 ADMIN_EMAIL = os.getenv("MZINGA_EMAIL")
 ADMIN_PASSWORD = os.getenv("MZINGA_PASSWORD")
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "5"))
+REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "20"))
 SMTP_HOST = os.getenv("SMTP_HOST", "localhost")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "1025"))
 EMAIL_FROM = os.getenv("EMAIL_FROM", "worker@mzinga.io")
@@ -45,6 +46,7 @@ class PayloadClient:
         response = self.session.post(
             f"{self.base_url}/api/users/login",
             json={"email": self.email, "password": self.password},
+            timeout=REQUEST_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
 
@@ -54,7 +56,7 @@ class PayloadClient:
             raise RuntimeError("Login succeeded but no JWT token was returned")
 
         self.token = token
-        self.session.headers.update({"Authorization": f"JWT {self.token}"})
+        self.session.headers.update({"Authorization": f"Bearer {self.token}"})
         logger.info("Authenticated against Payload API")
 
     def request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
@@ -62,6 +64,8 @@ class PayloadClient:
             self.authenticate()
 
         url = f"{self.base_url}{path}"
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = REQUEST_TIMEOUT_SECONDS
         response = self.session.request(method, url, **kwargs)
 
         if response.status_code == 401:
@@ -89,15 +93,11 @@ class PayloadClient:
             return [doc for doc in docs if isinstance(doc, dict)]
         return []
 
-    def update_status(self, document_id: str, status: str, error_message: str | None = None) -> dict[str, Any]:
-        body: dict[str, Any] = {"status": status}
-        if error_message is not None:
-            body["workerError"] = error_message[:1000]
-
+    def update_status(self, document_id: str, status: str) -> dict[str, Any]:
         response = self.request(
             "PATCH",
             f"/api/communications/{document_id}",
-            json=body,
+            json={"status": status},
         )
         payload = response.json()
         if isinstance(payload, dict) and "doc" in payload and isinstance(payload["doc"], dict):
@@ -242,7 +242,7 @@ def main() -> None:
             except Exception as exc:
                 logger.exception("Failed processing communication %s", document_id)
                 try:
-                    client.update_status(document_id, "failed", str(exc))
+                    client.update_status(document_id, "failed")
                 except Exception:
                     logger.exception("Failed to mark communication %s as failed", document_id)
 

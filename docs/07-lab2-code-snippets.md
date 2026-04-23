@@ -41,7 +41,7 @@ curl.exe -s -X POST http://localhost:3000/api/users/login `
 **macOS / Linux / WSL:**
 
 ```sh
-curl -s "http://localhost:3000/api/communications?where[status][equals]=pending&depth=1" \
+curl -g -s "http://localhost:3000/api/communications?where[status][equals]=pending&depth=1" \
   -H "Authorization: Bearer <token>" \
   | python3 -m json.tool
 ```
@@ -49,7 +49,7 @@ curl -s "http://localhost:3000/api/communications?where[status][equals]=pending&
 **Windows PowerShell:**
 
 ```powershell
-curl.exe -s "http://localhost:3000/api/communications?where[status][equals]=pending&depth=1" `
+curl.exe -g -s "http://localhost:3000/api/communications?where[status][equals]=pending&depth=1" `
   -H "Authorization: Bearer <token>" `
   | python -m json.tool
 ```

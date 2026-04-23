@@ -23,7 +23,6 @@ API_BASE_URL = os.getenv("MZINGA_URL") or os.getenv("API_BASE_URL", "http://loca
 ADMIN_EMAIL = os.getenv("MZINGA_EMAIL")
 ADMIN_PASSWORD = os.getenv("MZINGA_PASSWORD")
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "5"))
-REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "20"))
 SMTP_HOST = os.getenv("SMTP_HOST", "localhost")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "1025"))
 EMAIL_FROM = os.getenv("EMAIL_FROM", "worker@mzinga.io")
@@ -46,7 +45,6 @@ class PayloadClient:
         response = self.session.post(
             f"{self.base_url}/api/users/login",
             json={"email": self.email, "password": self.password},
-            timeout=REQUEST_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
 
@@ -64,8 +62,6 @@ class PayloadClient:
             self.authenticate()
 
         url = f"{self.base_url}{path}"
-        if "timeout" not in kwargs:
-            kwargs["timeout"] = REQUEST_TIMEOUT_SECONDS
         response = self.session.request(method, url, **kwargs)
 
         if response.status_code == 401:

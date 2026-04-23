@@ -20,18 +20,17 @@ logging.basicConfig(
 logger = logging.getLogger("lab2-worker")
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:3000")
-ADMIN_EMAIL = os.getenv("ADMIN_EMAIL")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
+ADMIN_EMAIL = os.getenv("MZINGA_EMAIL")
+ADMIN_PASSWORD = os.getenv("MZINGA_PASSWORD")
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "5"))
 SMTP_HOST = os.getenv("SMTP_HOST", "localhost")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "1025"))
 EMAIL_FROM = os.getenv("EMAIL_FROM", "worker@mzinga.io")
-REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "30"))
 
 if not ADMIN_EMAIL:
-    raise RuntimeError("ADMIN_EMAIL is required")
+    raise RuntimeError("MZINGA_EMAIL is required")
 if not ADMIN_PASSWORD:
-    raise RuntimeError("ADMIN_PASSWORD is required")
+    raise RuntimeError("MZINGA_PASSWORD is required")
 
 
 class PayloadClient:
@@ -46,7 +45,6 @@ class PayloadClient:
         response = self.session.post(
             f"{self.base_url}/api/users/login",
             json={"email": self.email, "password": self.password},
-            timeout=REQUEST_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
 
@@ -64,12 +62,12 @@ class PayloadClient:
             self.authenticate()
 
         url = f"{self.base_url}{path}"
-        response = self.session.request(method, url, timeout=REQUEST_TIMEOUT_SECONDS, **kwargs)
+        response = self.session.request(method, url, **kwargs)
 
         if response.status_code == 401:
             logger.warning("Received 401 from Payload API, re-authenticating")
             self.authenticate()
-            response = self.session.request(method, url, timeout=REQUEST_TIMEOUT_SECONDS, **kwargs)
+            response = self.session.request(method, url, **kwargs)
 
         response.raise_for_status()
         return response

@@ -1,106 +1,202 @@
-import os
-import time
-import smtplib
+import html
 import logging
+import os
+import smtplib
+import time
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from dotenv import load_dotenv
-from pymongo import MongoClient
+from typing import Any, Iterable
+
 from bson import ObjectId
+from dotenv import load_dotenv
+from pymongo import MongoClient, ReturnDocument
+
 
 load_dotenv()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger(__name__)
 
-client = MongoClient(os.environ["MONGODB_URI"])
-db = client.get_default_database()
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+logger = logging.getLogger("lab1-worker")
 
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECONDS", 5))
+MONGODB_URI = os.getenv("MONGODB_URI")
+POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "5"))
 SMTP_HOST = os.getenv("SMTP_HOST", "localhost")
-SMTP_PORT = int(os.getenv("SMTP_PORT", 1025))
+SMTP_PORT = int(os.getenv("SMTP_PORT", "1025"))
 EMAIL_FROM = os.getenv("EMAIL_FROM", "worker@mzinga.io")
 
-
-def slate_to_html(nodes: list) -> str:
-    """Minimal Slate AST → HTML serialiser."""
-    html = ""
-    for node in nodes or []:
-        if node.get("type") == "paragraph":
-            html += f"<p>{slate_to_html(node.get('children', []))}</p>"
-        elif node.get("type") == "h1":
-            html += f"<h1>{slate_to_html(node.get('children', []))}</h1>"
-        elif node.get("type") == "h2":
-            html += f"<h2>{slate_to_html(node.get('children', []))}</h2>"
-        elif node.get("type") == "ul":
-            html += f"<ul>{slate_to_html(node.get('children', []))}</ul>"
-        elif node.get("type") == "li":
-            html += f"<li>{slate_to_html(node.get('children', []))}</li>"
-        elif node.get("type") == "link":
-            url = node.get("url", "#")
-            html += f'<a href="{url}">{slate_to_html(node.get("children", []))}</a>'
-        elif "text" in node:
-            text = node["text"]
-            if node.get("bold"):
-                text = f"<strong>{text}</strong>"
-            if node.get("italic"):
-                text = f"<em>{text}</em>"
-            html += text
-        else:
-            html += slate_to_html(node.get("children", []))
-    return html
+if not MONGODB_URI:
+    raise RuntimeError("MONGODB_URI is required")
 
 
-def resolve_emails(relationship_list: list) -> list[str]:
-    """Resolve Payload relationship references to email addresses."""
-    if not relationship_list:
+client = MongoClient(MONGODB_URI)
+db = client.get_default_database()
+communications = db["communications"]
+users = db["users"]
+
+
+def get_child_html(node: dict[str, Any]) -> str:
+    children = node.get("children", [])
+    return "".join(render_node(child) for child in children)
+
+
+def render_leaf(node: dict[str, Any]) -> str:
+    text = html.escape(str(node.get("text", "")))
+    if node.get("bold"):
+        text = f"<strong>{text}</strong>"
+    if node.get("italic"):
+        text = f"<em>{text}</em>"
+    return text
+
+
+def render_node(node: Any) -> str:
+    if not isinstance(node, dict):
+        return ""
+
+    if "text" in node:
+        return render_leaf(node)
+
+    node_type = node.get("type")
+    children_html = get_child_html(node)
+
+    if node_type == "paragraph":
+        return f"<p>{children_html}</p>"
+    if node_type == "h1":
+        return f"<h1>{children_html}</h1>"
+    if node_type == "h2":
+        return f"<h2>{children_html}</h2>"
+    if node_type == "ul":
+        return f"<ul>{children_html}</ul>"
+    if node_type == "li":
+        return f"<li>{children_html}</li>"
+    if node_type == "link":
+        url = html.escape(str(node.get("url", "#")), quote=True)
+        return f'<a href="{url}">{children_html}</a>'
+
+    return children_html
+
+
+def slate_to_html(body: Any) -> str:
+    if not isinstance(body, list):
+        return ""
+    return "".join(render_node(node) for node in body)
+
+
+def normalize_relation_ids(relations: Any) -> list[ObjectId]:
+    ids: list[ObjectId] = []
+    if not isinstance(relations, list):
+        return ids
+
+    for item in relations:
+        if not isinstance(item, dict):
+            continue
+        if item.get("relationTo") != "users":
+            continue
+
+        value = item.get("value")
+        if isinstance(value, ObjectId):
+            ids.append(value)
+            continue
+        if isinstance(value, str):
+            try:
+                ids.append(ObjectId(value))
+            except Exception:
+                logger.warning("Skipping invalid ObjectId string: %s", value)
+
+    return ids
+
+
+def resolve_email_addresses(relations: Any) -> list[str]:
+    user_ids = normalize_relation_ids(relations)
+    if not user_ids:
         return []
-    ids = [ObjectId(r["value"]) for r in relationship_list if r.get("value")]
-    users = db.users.find({"_id": {"$in": ids}}, {"email": 1})
-    return [u["email"] for u in users if u.get("email")]
+
+    cursor = users.find({"_id": {"$in": user_ids}}, {"email": 1})
+    emails = []
+    for user_doc in cursor:
+        email_address = user_doc.get("email")
+        if isinstance(email_address, str) and email_address.strip():
+            emails.append(email_address.strip())
+
+    return emails
 
 
-def send_email(to_addresses: list[str], subject: str, html: str,
-               cc_addresses: list[str] = None, bcc_addresses: list[str] = None):
+def dedupe_keep_order(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+def send_email(document: dict[str, Any]) -> None:
+    to_emails = dedupe_keep_order(resolve_email_addresses(document.get("tos")))
+    cc_emails = dedupe_keep_order(resolve_email_addresses(document.get("ccs")))
+    bcc_emails = dedupe_keep_order(resolve_email_addresses(document.get("bccs")))
+
+    if not to_emails and not cc_emails and not bcc_emails:
+        raise ValueError("Communication has no resolvable recipients")
+
+    subject = str(document.get("subject", ""))
+    html_body = slate_to_html(document.get("body"))
+
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
     msg["From"] = EMAIL_FROM
-    msg["To"] = ", ".join(to_addresses)
-    if cc_addresses:
-        msg["Cc"] = ", ".join(cc_addresses)
-    msg.attach(MIMEText(html, "html"))
-    all_recipients = to_addresses + (cc_addresses or []) + (bcc_addresses or [])
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-        server.sendmail(EMAIL_FROM, all_recipients, msg.as_string())
+    if to_emails:
+        msg["To"] = ", ".join(to_emails)
+    if cc_emails:
+        msg["Cc"] = ", ".join(cc_emails)
+    msg["Subject"] = subject
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+    all_recipients = to_emails + cc_emails + bcc_emails
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as smtp:
+        smtp.sendmail(EMAIL_FROM, all_recipients, msg.as_string())
 
 
-def process(doc: dict):
-    doc_id = doc["_id"]
-    log.info(f"Processing communication {doc_id}")
-    db.communications.update_one({"_id": doc_id}, {"$set": {"status": "processing"}})
-    try:
-        to_emails = resolve_emails(doc.get("tos") or [])
-        if not to_emails:
-            raise ValueError("No valid 'to' email addresses found")
-        cc_emails = resolve_emails(doc.get("ccs") or [])
-        bcc_emails = resolve_emails(doc.get("bccs") or [])
-        html = slate_to_html(doc.get("body") or [])
-        send_email(to_emails, doc["subject"], html, cc_emails, bcc_emails)
-        db.communications.update_one({"_id": doc_id}, {"$set": {"status": "sent"}})
-        log.info(f"Communication {doc_id} sent successfully")
-    except Exception as e:
-        log.error(f"Failed to process communication {doc_id}: {e}")
-        db.communications.update_one({"_id": doc_id}, {"$set": {"status": "failed"}})
+def claim_next_pending() -> dict[str, Any] | None:
+    return communications.find_one_and_update(
+        {"status": "pending"},
+        {"$set": {"status": "processing", "workerPickedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}},
+        sort=[("createdAt", 1), ("_id", 1)],
+        return_document=ReturnDocument.AFTER,
+    )
 
 
-def poll():
-    log.info(f"Worker started. Polling every {POLL_INTERVAL}s")
+def mark_status(document_id: ObjectId, status: str, error_message: str | None = None) -> None:
+    update: dict[str, Any] = {"status": status}
+    if error_message:
+        update["workerError"] = error_message[:1000]
+    else:
+        update["workerError"] = None
+
+    communications.update_one({"_id": document_id}, {"$set": update})
+
+
+def main() -> None:
+    logger.info("Worker started. Polling every %s seconds.", POLL_INTERVAL_SECONDS)
+
     while True:
-        doc = db.communications.find_one({"status": "pending"})
-        if doc:
-            process(doc)
-        else:
-            time.sleep(POLL_INTERVAL)
+        document = claim_next_pending()
+        if not document:
+            time.sleep(POLL_INTERVAL_SECONDS)
+            continue
+
+        doc_id = document.get("_id")
+        logger.info("Claimed communication %s", doc_id)
+
+        try:
+            send_email(document)
+            mark_status(doc_id, "sent")
+            logger.info("Communication %s marked sent", doc_id)
+        except Exception as exc:
+            logger.exception("Failed processing communication %s", doc_id)
+            mark_status(doc_id, "failed", str(exc))
 
 
 if __name__ == "__main__":
-    poll()
+    main()

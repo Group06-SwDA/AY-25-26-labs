@@ -45,15 +45,12 @@ class PayloadClient:
         response = self.session.post(
             f"{self.base_url}/api/users/login",
             json={"email": self.email, "password": self.password},
+            timeout=10,
         )
         response.raise_for_status()
 
         payload = response.json()
-        token = payload.get("token")
-        if not isinstance(token, str) or not token.strip():
-            raise RuntimeError("Login succeeded but no JWT token was returned")
-
-        self.token = token
+        self.token = payload["token"]
         self.session.headers.update({"Authorization": f"Bearer {self.token}"})
         logger.info("Authenticated against Payload API")
 
@@ -62,12 +59,12 @@ class PayloadClient:
             self.authenticate()
 
         url = f"{self.base_url}{path}"
-        response = self.session.request(method, url, **kwargs)
+        response = self.session.request(method, url, timeout=10, **kwargs)
 
         if response.status_code == 401:
             logger.warning("Received 401 from Payload API, re-authenticating")
             self.authenticate()
-            response = self.session.request(method, url, **kwargs)
+            response = self.session.request(method, url, timeout=10, **kwargs)
 
         response.raise_for_status()
         return response
@@ -83,11 +80,7 @@ class PayloadClient:
                 "sort": "createdAt",
             },
         )
-        payload = response.json()
-        docs = payload.get("docs", [])
-        if isinstance(docs, list):
-            return [doc for doc in docs if isinstance(doc, dict)]
-        return []
+        return response.json().get("docs", [])
 
     def update_status(self, document_id: str, status: str) -> dict[str, Any]:
         response = self.request(
@@ -95,10 +88,7 @@ class PayloadClient:
             f"/api/communications/{document_id}",
             json={"status": status},
         )
-        payload = response.json()
-        if isinstance(payload, dict) and "doc" in payload and isinstance(payload["doc"], dict):
-            return payload["doc"]
-        return payload if isinstance(payload, dict) else {}
+        return response.json()
 
 
 def get_child_html(node: dict[str, Any]) -> str:
@@ -152,15 +142,16 @@ def dedupe_keep_order(values: Iterable[str]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
     for value in values:
-        normalized = value.strip()
-        if normalized and normalized not in seen:
-            seen.add(normalized)
-            result.append(normalized)
+        value = value.strip()
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
     return result
 
 
 def extract_emails(relations: Any) -> list[str]:
     emails: list[str] = []
+
     if not isinstance(relations, list):
         return emails
 
@@ -169,12 +160,11 @@ def extract_emails(relations: Any) -> list[str]:
             continue
 
         value = item.get("value")
-        if isinstance(value, dict):
-            email_address = value.get("email")
-            if isinstance(email_address, str):
-                emails.append(email_address)
+        if isinstance(value, dict) and isinstance(value.get("email"), str):
+            emails.append(value["email"])
+
         elif isinstance(item.get("email"), str):
-            emails.append(str(item["email"]))
+            emails.append(item["email"])
 
     return dedupe_keep_order(emails)
 
@@ -185,7 +175,7 @@ def send_email(document: dict[str, Any]) -> None:
     bcc_emails = extract_emails(document.get("bccs"))
 
     if not to_emails and not cc_emails and not bcc_emails:
-        raise ValueError("Communication has no resolvable recipients")
+        raise ValueError("Communication has no recipients")
 
     subject = str(document.get("subject", ""))
     html_body = slate_to_html(document.get("body"))
@@ -201,7 +191,7 @@ def send_email(document: dict[str, Any]) -> None:
 
     all_recipients = to_emails + cc_emails + bcc_emails
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as smtp:
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as smtp:
         smtp.sendmail(EMAIL_FROM, all_recipients, msg.as_string())
 
 
@@ -222,23 +212,27 @@ def main() -> None:
             continue
 
         for document in pending_documents:
-            document_id = document.get("id")
-            if not isinstance(document_id, str) or not document_id:
-                logger.warning("Skipping communication without a valid id: %r", document)
+            document_id = str(document.get("id", "")).strip()
+            if not document_id:
+                logger.warning("Skipping communication without a valid id")
                 continue
 
             try:
                 client.update_status(document_id, "processing")
                 logger.info("Claimed communication %s", document_id)
+
                 send_email(document)
+
                 client.update_status(document_id, "sent")
                 logger.info("Communication %s marked sent", document_id)
-            except Exception as exc:
+            except Exception:
                 logger.exception("Failed processing communication %s", document_id)
                 try:
                     client.update_status(document_id, "failed")
                 except Exception:
                     logger.exception("Failed to mark communication %s as failed", document_id)
+
+        time.sleep(POLL_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":

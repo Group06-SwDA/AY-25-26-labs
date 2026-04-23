@@ -1,0 +1,3 @@
+[submodule "mzinga/mzinga-apps"]
+	path = mzinga/mzinga-apps
+	url = https://github.com/Giuseppeclv008/mzinga-apps.git

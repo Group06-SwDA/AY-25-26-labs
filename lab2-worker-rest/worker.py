@@ -228,11 +228,9 @@ def main() -> None:
                 continue
 
             try:
-                claimed_document = client.update_status(document_id, "processing")
+                client.update_status(document_id, "processing")
                 logger.info("Claimed communication %s", document_id)
-                working_document = claimed_document if claimed_document else document
-
-                send_email(working_document)
+                send_email(document)
                 client.update_status(document_id, "sent")
                 logger.info("Communication %s marked sent", document_id)
             except Exception as exc:

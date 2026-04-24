@@ -218,7 +218,7 @@ def main() -> None:
                 continue
 
             try:
-                client.update_status(document_id, "processing")
+                claimed_document = client.update_status(document_id, "processing")
                 logger.info("Claimed communication %s", document_id)
 
                 send_email(document)

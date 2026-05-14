@@ -1,6 +1,5 @@
 
 import html
-import logging
 import os
 import smtplib
 import time
@@ -87,7 +86,7 @@ class PayloadClient:
         response = self.session.request(method, url, timeout=10, **kwargs)
 
         if response.status_code == 401:
-            logger.warning("Received 401 from Payload API, re-authenticating")
+            logger.warning("payload_api_unauthorized")
             self.authenticate()
             response = self.session.request(method, url, timeout=10, **kwargs)
 
@@ -222,8 +221,11 @@ def send_email(document: dict[str, Any]) -> None:
 
 def main() -> None:
     client = PayloadClient(API_BASE_URL, ADMIN_EMAIL, ADMIN_PASSWORD)
-    logger.info("Worker started. Polling %s every %s seconds.", API_BASE_URL, POLL_INTERVAL_SECONDS)
-
+    logger.info(
+        "worker_started",
+        api_base_url=API_BASE_URL,
+        poll_interval_seconds=POLL_INTERVAL_SECONDS,
+    )
     while True:
         try:
             pending_documents = client.get_pending_documents()
@@ -246,7 +248,7 @@ def main() -> None:
             bind_contextvars(doc_id=document_id)
 
             try:
-                claimed_document = client.update_status(document_id, "processing")
+                client.update_status(document_id, "processing")
                 logger.info("communication_claimed")
 
                 send_email(document)
@@ -259,6 +261,8 @@ def main() -> None:
                     client.update_status(document_id, "failed")
                 except Exception:
                     logger.exception("failed_to_mark_failed")
+            finally:
+                clear_contextvars()
 
         time.sleep(POLL_INTERVAL_SECONDS)
 

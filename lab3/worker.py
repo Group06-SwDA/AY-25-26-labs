@@ -55,6 +55,27 @@ meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader]
 metrics.set_meter_provider(meter_provider)
 meter = metrics.get_meter("email-worker")
 
+emails_processed = meter.create_counter(
+    name="emails_processed_total",
+    description="Total number of communications processed",
+    unit="1",
+)
+email_processing_duration = meter.create_histogram(
+    name="email_processing_duration_seconds",
+    description="Total duration of processing one communication",
+    unit="s",
+)
+smtp_send_duration = meter.create_histogram(
+    name="smtp_send_duration_seconds",
+    description="Duration of the SMTP send call",
+    unit="s",
+)
+worker_poll_total = meter.create_counter(
+    name="worker_poll_total",
+    description="Number of poll cycles",
+    unit="1",
+)
+
 def add_trace_context(_, __, event_dict):
     span = get_current_span()
 
@@ -231,6 +252,14 @@ def extract_emails(relations: Any) -> list[str]:
     return dedupe_keep_order(emails)
 
 
+def count_recipients(document: dict[str, Any]) -> int:
+    return (
+        len(extract_emails(document.get("tos")))
+        + len(extract_emails(document.get("ccs")))
+        + len(extract_emails(document.get("bccs")))
+    )
+
+
 def send_email(document: dict[str, Any]) -> None:
     to_emails = extract_emails(document.get("tos"))
     cc_emails = extract_emails(document.get("ccs"))
@@ -260,8 +289,12 @@ def send_email(document: dict[str, Any]) -> None:
     with tracer.start_as_current_span("send_email") as span:
         span.set_attribute("recipient_count", len(all_recipients))
 
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as smtp:
-            smtp.sendmail(EMAIL_FROM, all_recipients, msg.as_string())
+        started_at = time.perf_counter()
+        try:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as smtp:
+                smtp.sendmail(EMAIL_FROM, all_recipients, msg.as_string())
+        finally:
+            smtp_send_duration.record(time.perf_counter() - started_at)
 
 
 def main() -> None:
@@ -280,9 +313,11 @@ def main() -> None:
             continue
 
         if not pending_documents:
+            worker_poll_total.add(1, {"result": "empty"})
             time.sleep(POLL_INTERVAL_SECONDS)
             continue
 
+        worker_poll_total.add(1, {"result": "found"})
 
         for document in pending_documents:
             document_id = str(document.get("id", "")).strip()
@@ -291,6 +326,8 @@ def main() -> None:
                 continue
 
             bind_contextvars(doc_id=document_id)
+            recipient_count = count_recipients(document)
+            started_at = time.perf_counter()
 
             with tracer.start_as_current_span("process_communication") as span:
                 span.set_attribute("doc_id", document_id)
@@ -302,10 +339,20 @@ def main() -> None:
                     send_email(document)
 
                     client.update_status(document_id, "sent")
+                    email_processing_duration.record(time.perf_counter() - started_at)
+                    emails_processed.add(
+                        1,
+                        {"status": "sent", "recipient_count": recipient_count},
+                    )
                     logger.info("communication_sent")
                 except Exception as exc:
                     span.record_exception(exc)
                     span.set_status(Status(StatusCode.ERROR, str(exc)))
+                    email_processing_duration.record(time.perf_counter() - started_at)
+                    emails_processed.add(
+                        1,
+                        {"status": "failed", "recipient_count": recipient_count},
+                    )
                     logger.exception("communication_failed")
                     try:
                         client.update_status(document_id, "failed")

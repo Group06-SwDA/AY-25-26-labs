@@ -628,4 +628,4 @@ python worker.py
 
 ---
 
-**Previous:** [06 — Lab 1 Code Snippets](06-lab1-code-snippets.md) · **Step-by-step guide:** [07 — Lab 2 Step by Step](07-lab2-step-by-step.md)
+**Previous:** [06 — Lab 1 Code Snippets](06-lab1-code-snippets.md) · **Step-by-step guide:** [07 — Lab 2 Step by Step](07-lab2-step-by-step.md) · **Next:** [08 — Lab 3 Step by Step](08-lab3-step-by-step.md)

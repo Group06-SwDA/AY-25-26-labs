@@ -6,7 +6,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.requests import RequestsInstrumentor
     
-    def init_tracer(worker_version: str = "1.0.0"):
+def init_tracer(worker_version: str = "1.0.0"):
     # 1. Create a Resource
     resource = Resource.create({
         "service.name": "email-worker",

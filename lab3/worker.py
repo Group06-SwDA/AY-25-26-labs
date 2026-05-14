@@ -17,9 +17,9 @@ from opentelemetry.instrumentation.requests import RequestsInstrumentor
 from opentelemetry.sdk.resources import Resource, SERVICE_NAME, SERVICE_VERSION
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.trace import get_current_span
+from opentelemetry.trace import Status, StatusCode, get_current_span
 
-from structlog.contextvars import bind_contextvars
+from structlog.contextvars import bind_contextvars, clear_contextvars
 
 load_dotenv()
 
@@ -42,6 +42,7 @@ tracer_provider = TracerProvider(resource=resource)
 tracer_provider.add_span_processor(span_processor)
 trace.set_tracer_provider(tracer_provider)
 RequestsInstrumentor().instrument()
+tracer = trace.get_tracer("email-worker")
 
 def add_trace_context(_, __, event_dict):
     span = get_current_span()
@@ -228,7 +229,11 @@ def send_email(document: dict[str, Any]) -> None:
         raise ValueError("Communication has no recipients")
 
     subject = str(document.get("subject", ""))
-    html_body = slate_to_html(document.get("body"))
+    body = document.get("body")
+
+    with tracer.start_as_current_span("serialize_body") as span:
+        span.set_attribute("node_count", len(body) if isinstance(body, list) else 0)
+        html_body = slate_to_html(body)
 
     msg = MIMEMultipart("alternative")
     msg["From"] = EMAIL_FROM
@@ -241,8 +246,11 @@ def send_email(document: dict[str, Any]) -> None:
 
     all_recipients = to_emails + cc_emails + bcc_emails
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as smtp:
-        smtp.sendmail(EMAIL_FROM, all_recipients, msg.as_string())
+    with tracer.start_as_current_span("send_email") as span:
+        span.set_attribute("recipient_count", len(all_recipients))
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as smtp:
+            smtp.sendmail(EMAIL_FROM, all_recipients, msg.as_string())
 
 
 def main() -> None:
@@ -273,22 +281,27 @@ def main() -> None:
 
             bind_contextvars(doc_id=document_id)
 
-            try:
-                client.update_status(document_id, "processing")
-                logger.info("communication_claimed")
+            with tracer.start_as_current_span("process_communication") as span:
+                span.set_attribute("doc_id", document_id)
 
-                send_email(document)
-
-                client.update_status(document_id, "sent")
-                logger.info("communication_sent")
-            except Exception:
-                logger.exception("communication_failed")
                 try:
-                    client.update_status(document_id, "failed")
-                except Exception:
-                    logger.exception("failed_to_mark_failed")
-            finally:
-                clear_contextvars()
+                    client.update_status(document_id, "processing")
+                    logger.info("communication_claimed")
+
+                    send_email(document)
+
+                    client.update_status(document_id, "sent")
+                    logger.info("communication_sent")
+                except Exception as exc:
+                    span.record_exception(exc)
+                    span.set_status(Status(StatusCode.ERROR, str(exc)))
+                    logger.exception("communication_failed")
+                    try:
+                        client.update_status(document_id, "failed")
+                    except Exception:
+                        logger.exception("failed_to_mark_failed")
+                finally:
+                    clear_contextvars()
 
         time.sleep(POLL_INTERVAL_SECONDS)
 

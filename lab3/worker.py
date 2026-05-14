@@ -24,7 +24,21 @@ from prometheus_client import start_http_server
 
 from structlog.contextvars import bind_contextvars, clear_contextvars
 
+import signal
+import threading
+
 load_dotenv()
+
+shutdown_event = threading.Event()
+
+
+def handle_shutdown(signum, frame):
+    logger.info("shutdown_signal_received", signal=signum)
+    shutdown_event.set()
+
+
+signal.signal(signal.SIGINT, handle_shutdown)
+signal.signal(signal.SIGTERM, handle_shutdown)
 
 WORKER_VERSION = "1.0.0"
 OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318/v1/traces")
@@ -45,10 +59,15 @@ span_processor = BatchSpanProcessor(otlp_exporter)
 tracer_provider = TracerProvider(resource=resource)
 tracer_provider.add_span_processor(span_processor)
 trace.set_tracer_provider(tracer_provider)
-RequestsInstrumentor().instrument()
+RequestsInstrumentor().instrument(excluded_urls=f"{OTLP_ENDPOINT}")
 tracer = trace.get_tracer("email-worker")
 
-start_http_server(port=PROMETHEUS_PORT)
+try:
+    start_http_server(port=PROMETHEUS_PORT)
+    logger.info("prometheus_server_started", port=PROMETHEUS_PORT)
+except OSError as e:
+    logger.error("prometheus_server_failed", port=PROMETHEUS_PORT, error=str(e))
+    # Continue anyway, metrics just won't be available via HTTP
 metric_reader = PrometheusMetricReader()
 meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
 metrics.set_meter_provider(meter_provider)
@@ -141,12 +160,13 @@ class PayloadClient:
             self.authenticate()
 
         url = f"{self.base_url}{path}"
-        response = self.session.request(method, url, timeout=10, **kwargs)
+        kwargs.setdefault("timeout", 10)
+        response = self.session.request(method, url, **kwargs)
 
         if response.status_code == 401:
             logger.warning("payload_api_unauthorized")
             self.authenticate()
-            response = self.session.request(method, url, timeout=10, **kwargs)
+            response = self.session.request(method, url, **kwargs)
 
         response.raise_for_status()
         return response
@@ -184,6 +204,10 @@ def render_leaf(node: dict[str, Any]) -> str:
         text = f"<strong>{text}</strong>"
     if node.get("italic"):
         text = f"<em>{text}</em>"
+    if node.get("underline"):
+        text = f"<u>{text}</u>"
+    if node.get("code"):
+        text = f"<code>{text}</code>"
     return text
 
 
@@ -205,8 +229,12 @@ def render_node(node: Any) -> str:
         return f"<h2>{children_html}</h2>"
     if node_type == "ul":
         return f"<ul>{children_html}</ul>"
+    if node_type == "ol":
+        return f"<ol>{children_html}</ol>"
     if node_type == "li":
         return f"<li>{children_html}</li>"
+    if node_type == "quote":
+        return f"<blockquote>{children_html}</blockquote>"
     if node_type == "link":
         url = html.escape(str(node.get("url", "#")), quote=True)
         return f'<a href="{url}">{children_html}</a>'
@@ -303,22 +331,28 @@ def main() -> None:
         api_base_url=API_BASE_URL,
         poll_interval_seconds=POLL_INTERVAL_SECONDS,
     )
-    while True:
+
+    while not shutdown_event.is_set():
         try:
             pending_documents = client.get_pending_documents()
         except Exception:
             logger.exception("Failed to fetch pending communications")
-            time.sleep(POLL_INTERVAL_SECONDS)
+            if shutdown_event.wait(POLL_INTERVAL_SECONDS):
+                break
             continue
 
         if not pending_documents:
             worker_poll_total.add(1, {"result": "empty"})
-            time.sleep(POLL_INTERVAL_SECONDS)
+            if shutdown_event.wait(POLL_INTERVAL_SECONDS):
+                break
             continue
 
         worker_poll_total.add(1, {"result": "found"})
 
         for document in pending_documents:
+            if shutdown_event.is_set():
+                break
+
             document_id = str(document.get("id", "")).strip()
             if not document_id:
                 logger.warning("Skipping communication without a valid id")
@@ -360,7 +394,10 @@ def main() -> None:
                 finally:
                     clear_contextvars()
 
-        time.sleep(POLL_INTERVAL_SECONDS)
+        if not shutdown_event.is_set():
+            shutdown_event.wait(POLL_INTERVAL_SECONDS)
+
+    logger.info("worker_stopped")
 
 
 if __name__ == "__main__":

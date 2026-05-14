@@ -19,9 +19,7 @@ const Communications: CollectionConfig = {
     delete: () => {
       return false;
     },
-    update: () => {
-      return false;
-    },
+    update: access.GetIsAdmin,
   },
   admin: {
     ...collectionUtils.GeneratePreviewConfig(),
@@ -33,18 +31,20 @@ const Communications: CollectionConfig = {
   },
   hooks: {
     afterChange: [
-      async ({ doc }) => {
+      async ({ doc, operation }) => {
         const useExternalWorker =
           process.env.COMMUNICATIONS_EXTERNAL_WORKER === "true";
 
         if (useExternalWorker) {
-          await payload.update({
-            collection: Slugs.Communications,
-            id: doc.id,
-            data: {
-              status: "pending",
-            },
-          });
+          if (operation === "create") {
+            await payload.update({
+              collection: Slugs.Communications,
+              id: doc.id,
+              data: {
+                status: "pending",
+              },
+            });
+          }
 
           return doc;
         }

@@ -10,13 +10,17 @@ import requests
 from dotenv import load_dotenv
 
 import structlog
+from opentelemetry import metrics
 from opentelemetry import trace
+from opentelemetry.exporter.prometheus import PrometheusMetricReader
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.requests import RequestsInstrumentor
+from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.resources import Resource, SERVICE_NAME, SERVICE_VERSION
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import Status, StatusCode, get_current_span
+from prometheus_client import start_http_server
 
 from structlog.contextvars import bind_contextvars, clear_contextvars
 
@@ -24,6 +28,7 @@ load_dotenv()
 
 WORKER_VERSION = "1.0.0"
 OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318/v1/traces")
+PROMETHEUS_PORT = int(os.getenv("PROMETHEUS_PORT", "8000"))
 
 if not OTLP_ENDPOINT.endswith("/v1/traces"):
     OTLP_ENDPOINT = f"{OTLP_ENDPOINT.rstrip('/')}/v1/traces"
@@ -42,6 +47,12 @@ tracer_provider.add_span_processor(span_processor)
 trace.set_tracer_provider(tracer_provider)
 RequestsInstrumentor().instrument()
 tracer = trace.get_tracer("email-worker")
+
+start_http_server(port=PROMETHEUS_PORT)
+metric_reader = PrometheusMetricReader()
+meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
+metrics.set_meter_provider(meter_provider)
+meter = metrics.get_meter("email-worker")
 
 def add_trace_context(_, __, event_dict):
     span = get_current_span()

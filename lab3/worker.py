@@ -1,6 +1,5 @@
 
 import html
-import logging
 import os
 import smtplib
 import time
@@ -12,11 +11,37 @@ import requests
 from dotenv import load_dotenv
 
 import structlog
+from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.requests import RequestsInstrumentor
+from opentelemetry.sdk.resources import Resource, SERVICE_NAME, SERVICE_VERSION
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import get_current_span
 
-from structlog.contextvars import bind_contextvars, clear_contextvars
+from structlog.contextvars import bind_contextvars
 
 load_dotenv()
+
+WORKER_VERSION = "1.0.0"
+OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318/v1/traces")
+
+if not OTLP_ENDPOINT.endswith("/v1/traces"):
+    OTLP_ENDPOINT = f"{OTLP_ENDPOINT.rstrip('/')}/v1/traces"
+
+resource = Resource(
+    attributes={
+        SERVICE_NAME: "email-worker",
+        SERVICE_VERSION: WORKER_VERSION,
+    }
+)
+
+otlp_exporter = OTLPSpanExporter(endpoint=OTLP_ENDPOINT)
+span_processor = BatchSpanProcessor(otlp_exporter)
+tracer_provider = TracerProvider(resource=resource)
+tracer_provider.add_span_processor(span_processor)
+trace.set_tracer_provider(tracer_provider)
+RequestsInstrumentor().instrument()
 
 def add_trace_context(_, __, event_dict):
     span = get_current_span()

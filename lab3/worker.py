@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 import structlog
 from opentelemetry.trace import get_current_span
 
+from structlog.contextvars import bind_contextvars, clear_contextvars
 
 load_dotenv()
 
@@ -235,26 +236,29 @@ def main() -> None:
             time.sleep(POLL_INTERVAL_SECONDS)
             continue
 
+
         for document in pending_documents:
             document_id = str(document.get("id", "")).strip()
             if not document_id:
                 logger.warning("Skipping communication without a valid id")
                 continue
 
+            bind_contextvars(doc_id=document_id)
+
             try:
                 claimed_document = client.update_status(document_id, "processing")
-                logger.info("Claimed communication %s", document_id)
+                logger.info("communication_claimed")
 
                 send_email(document)
 
                 client.update_status(document_id, "sent")
-                logger.info("Communication %s marked sent", document_id)
+                logger.info("communication_sent")
             except Exception:
-                logger.exception("Failed processing communication %s", document_id)
+                logger.exception("communication_failed")
                 try:
                     client.update_status(document_id, "failed")
                 except Exception:
-                    logger.exception("Failed to mark communication %s as failed", document_id)
+                    logger.exception("failed_to_mark_failed")
 
         time.sleep(POLL_INTERVAL_SECONDS)
 
